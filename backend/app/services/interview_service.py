@@ -1,4 +1,4 @@
-"""封装 run_interview_workflow，维护 InterviewSession 会话 state（当前内存，Step 2 再接 DB）。"""
+"""封装 run_interview_workflow，维护 InterviewSession 会话 state（SQLite 持久化）。"""
 from __future__ import annotations
 
 import uuid
@@ -6,7 +6,8 @@ from datetime import datetime
 
 from langchain_core.messages import AIMessage, HumanMessage
 from pydantic import BaseModel, Field
-from sqlalchemy.ext.asyncio.session import AsyncSession
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.agent.interviewer.graph import run_interview_workflow
 from backend.app.models.interview_session import InterviewSessionORM
@@ -94,9 +95,16 @@ async def get_session(db: AsyncSession,session_id: str) -> InterviewSession | No
 
 
 
-async def _save_session(db: AsyncSession, session: InterviewSession) -> None:
-    row = await db.get(InterviewSession, session.id)
+def _session_to_orm_payload(session: InterviewSession) -> dict:
     payload = session.model_dump()
+    payload.setdefault("transcript_path", "")
+    payload.setdefault("report_path", "")
+    return payload
+
+
+async def _save_session(db: AsyncSession, session: InterviewSession) -> None:
+    row = await db.get(InterviewSessionORM, session.id)
+    payload = _session_to_orm_payload(session)
     if row is None:
         db.add(InterviewSessionORM(**payload))
     else:
@@ -169,8 +177,29 @@ async def _run_and_persist(db: AsyncSession, session: InterviewSession, graph_st
     await _save_session(db, session)
     return session
 
-def list_interviews(db: AsyncSession) -> list[InterviewSessionORM]:
-    return db.query(InterviewSessionORM).all()
+async def list_sessions(db: AsyncSession) -> list[dict]:
+    result = await db.execute(
+        select(InterviewSessionORM).order_by(InterviewSessionORM.created_at.desc())
+    )
+    summaries = []
+    for row in result.scalars().all():
+        session = _orm_to_session(row)
+        summaries.append({
+            "id": session.id,
+            "status": session.status,
+            "current_round": session.current_round,
+            "max_rounds": session.max_rounds,
+            "resume_profile_id": session.resume_profile_id,
+            "job_profile_id": session.job_profile_id,
+            "selected_material_ids": session.selected_material_ids,
+            "total_score": session.assessment.get("total_score") if session.assessment else None,
+            "assessment_status": session.assessment_status,
+            "assessment_error": session.assessment_error,
+            "memory_update_count": len(session.memory_updates),
+            "created_at": session.created_at,
+        })
+    return summaries
+
 
 async def generate_first_question(db: AsyncSession, session: InterviewSession) -> InterviewEvent:
     session = await _run_and_persist(db, session)
