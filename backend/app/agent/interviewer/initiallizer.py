@@ -1,7 +1,5 @@
 from backend.app.agent.state import InterviewState
-from backend.app.api import resume_service, material_service, memory_service
-from backend.app.database import get_db
-from backend.app.services import job_service
+from backend.app.services import memory_service
 
 TOPIC_POOL = [
     "技术栈与项目经验",
@@ -11,55 +9,42 @@ TOPIC_POOL = [
     "架构与设计模式",
     "团队协作与流程",
 ]
-async def initialize_node(state: InterviewState):
-    session_id=state.get("session_id")
-    if state.get("messages") and len(state.get("messages")) > 0:
+
+
+async def initialize_node(state: InterviewState) -> dict:
+    if state.get("messages"):
         return {}
-    session=await get_db().get(InterviewState, session_id)
-    if session is None:
-         return {"action": "assess", "assessment": {"error": "Session not found"}}
-    resume = None
-    job=None
-    material=[]
-    rid = session.get("resume_profile_id")
-    if rid:
-        r=resume_service.get_resume(rid)
-        if r:
-            resume=r.model_dump(rid)
-    jid=session.get("job_profile_id")
-    if jid:
-        j=job_service.get_job(jid)
-        if j:
-            job=j.model_dump(jid)
-    for mid in session.get("selected_material_ids", []):
-        m=material_service.get_material(mid)
-        if m:
-            material.append(m.model_dump())
-    weakness_memory=memory_service.list_weakness_memories(limit=5)
-    first_topic=_pick_initial_topic(job, resume, weakness_memory)
+
+    resume = state.get("resume_profile")
+    job = state.get("job_profile")
+    weakness_memory = memory_service.list_weakness_memories(limit=5)
+    first_topic = state.get("current_topic") or _pick_initial_topic(job, resume, weakness_memory)
+
     return {
         "resume_profile": resume,
         "job_profile": job,
-        "selected_material_ids": session.get("selected_material_ids", []),
+        "selected_material_ids": state.get("selected_material_ids", []),
         "retrieved_context": [],
         "weakness_memory": weakness_memory,
         "current_topic": first_topic,
-        "covered_topics": [],
+        "covered_topics": state.get("covered_topics", []),
         "action": "initial_question",
         "follow_up_count": 0,
         "unclear_count": 0,
-        "current_round": session.get("current_round", 0),
-        "max_rounds": session.get("max_rounds", 8),
+        "current_round": state.get("current_round", 0),
+        "max_rounds": state.get("max_rounds", 8),
         "assessment": None,
         "assessment_status": "pending",
         "assessment_error": "",
         "memory_updates": [],
         "router_source": "",
+        "report_path": "",
     }
+
 
 def _pick_initial_topic(job, resume, weakness_memory):
     if job:
-        skills=job.get("must_have_skills_json") or []
+        skills = job.get("must_have_skills_json") or []
         if skills:
             return str(skills[0])[:80]
         if job.get("domain"):
@@ -74,6 +59,4 @@ def _pick_initial_topic(job, resume, weakness_memory):
             return str(highlights[0])[:80]
     if weakness_memory:
         return weakness_memory[0].get("topic", TOPIC_POOL[0])
-
     return TOPIC_POOL[0]
-

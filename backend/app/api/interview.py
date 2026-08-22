@@ -2,20 +2,19 @@ from fastapi import APIRouter, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.agent.evaluator.graph import run_evaluator_agent
-from backend.app.agent.interviewer.graph import run_interview_agent
-from backend.app.agent.state import IntervieweState
+
 
 router=APIRouter(prefix='/api/v1/interviews')
 
 @router.get('/start')
 async def start_interview(data: dict):
-    result = await run_interview_agent(
-        interview_id=data.get("interview_id"),
-        position_name=data.get("position_name", 'agent开发工程师'),
-    )
+    # result = await run_interview_agent(
+    #     interview_id=data.get("interview_id"),
+    #     position_name=data.get("position_name", 'agent开发工程师'),
+    # )
     return {
         "interview_id": "test_id",
-        "question": result.get('current_question'),
+        # "question": result.get('current_question'),
         "current_question": 1,
         "total_round": 5,
     }

@@ -1,35 +1,31 @@
-from langchain_core.messages import SystemMessage, AIMessage
+from langchain_core.messages import AIMessage, SystemMessage
 
 from backend.app.agent.state import InterviewState
-from backend.app.llm.model_router import get_llm, log_llm_success, now_ms,log_llm_failure
+from backend.app.llm.model_router import get_llm, log_llm_failure, log_llm_success, now_ms
 from backend.app.rag.retrieval import format_context, retrieve_material_context
 
-TOPIC_POOL = [
-    "技术栈与项目经验",
-    "系统设计",
-    "数据库与存储",
-    "编程基础与算法",
-    "架构与设计模式",
-    "团队协作与流程",
-]
-def _retrieve_context(topic: str, state: InterviewState) -> str:
+
+def _retrieve_context(topic: str, state: InterviewState) -> list[dict]:
     material_ids = state.get("selected_material_ids", [])
     if not material_ids:
         return []
-    latest_user_answer=""
+
+    latest_user_answer = ""
     for message in reversed(state.get("messages", [])):
         if getattr(message, "type", "") == "human":
             latest_user_answer = message.content
             break
-    job=state.get("job_profile") or {}
-    query="".join([
+
+    job = state.get("job_profile") or {}
+    query = " ".join([
         topic or "",
         job.get("domain", ""),
         latest_user_answer,
     ]).strip()
     return retrieve_material_context(query, material_ids, top_k=2)
 
-def _build_system_prompt(action: str, topic: str, context:str, weakness_memory:list[dict]) -> str:
+
+def _build_system_prompt(action: str, topic: str, context: str, weakness_memory: list[dict]) -> str:
     base = "你是一位专业的面试官。请根据以下信息生成面试问题。用中文提问，保持自然、专业。"
     if action == "initial_question":
         base += f"\n这是一场面试的开场。请结合以下主题提问: {topic}"
@@ -50,43 +46,49 @@ def _build_system_prompt(action: str, topic: str, context:str, weakness_memory:l
     base += "\n\n只输出问题本身，不要加任何说明文字。"
     return base
 
+
 async def _generate_with_llm(
-        llm,
-        action: str,
-        topic: str,
-        context: str,
-        messages: list,
-        weakness_memory:list[dict]
-)->str | None:
+    llm,
+    action: str,
+    topic: str,
+    context: str,
+    messages: list,
+    weakness_memory: list[dict],
+) -> str:
     system_prompt = _build_system_prompt(action, topic, context, weakness_memory)
-    prompt_messages=[SystemMessage(content=system_prompt)]
-    for message in messages[-6]:
+    prompt_messages = [SystemMessage(content=system_prompt)]
+    for message in messages[-6:]:
         prompt_messages.append(message)
-    response=await llm.ainvoke(prompt_messages)
-    return response.content if response else None
+    response = await llm.ainvoke(prompt_messages)
+    if not response or not response.content:
+        raise ValueError("empty response content")
+    return response.content
 
-async def interviewer_node(state: InterviewState)->dict:
-    action=state.get('action', 'initial_question')
-    current_topic=state.get('current_topic', '')
-    messages=list(state.get('messages', []))
-    weakness_memory=state.get('weakness_memory', [])
 
-    retrieved_chunks=_retrieve_context(current_topic, state)
-    context=format_context(retrieved_chunks)
+async def interviewer_node(state: InterviewState) -> dict:
+    action = state.get("action", "initial_question")
+    current_topic = state.get("current_topic", "")
+    messages = list(state.get("messages", []))
+    weakness_memory = state.get("weakness_memory", [])
 
-    llm=get_llm("interviewer")
-    if llm:
-        started_ms=now_ms()
-        try:
-            question_text=_generate_with_llm(llm, action, current_topic, context, messages, weakness_memory)
-            if not question_text:
-                raise ValueError("empty response content")
-            log_llm_success("interviewer", started_ms)
-            return {
-                "messages": [AIMessage(content=question_text)],
-                "current_round": state.get("current_round", 0) + 1,
-                "retrieved_context": retrieved_chunks,
-            }
-        except Exception as exc:
-            log_llm_failure("interviewer", exc, started_ms)
+    retrieved_chunks = _retrieve_context(current_topic, state)
+    context = format_context(retrieved_chunks)
 
+    llm = get_llm("interviewer")
+    if not llm:
+        raise RuntimeError("interviewer LLM is not configured")
+
+    started_ms = now_ms()
+    try:
+        question_text = await _generate_with_llm(
+            llm, action, current_topic, context, messages, weakness_memory
+        )
+        log_llm_success("interviewer", started_ms)
+        return {
+            "messages": [AIMessage(content=question_text)],
+            "current_round": state.get("current_round", 0) + 1,
+            "retrieved_context": retrieved_chunks,
+        }
+    except Exception as exc:
+        log_llm_failure("interviewer", exc, started_ms)
+        raise
