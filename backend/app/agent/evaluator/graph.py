@@ -1,25 +1,29 @@
 import asyncio
 from langgraph.graph import StateGraph, START, END
-from backend.app.llm.client import get_llm_client
+
+from backend.app.agent.schemas.llm_output import AssessmentResult
 from backend.app.agent.state import EvaluatorState
 import logging
+
+from backend.app.llm.model_router import get_llm
 
 logger = logging.getLogger(__name__)
 
 def create_evaluator_graph():
     async def evaluete(state):
-        # llm=get_llm_client()
+        llm=get_llm("assessment")
         prompt=f"评估回答: 问题: {state['question']} 回答: {state['response']}"
         try:
-            # response = await llm.generate([prompt])
-            state['score'] = 85
-            state['strengths'] = ['回答清晰', '有实践经验']
-            state['weaknesses'] = ['可以更深入']
-            state['suggestions'] = ['多举例子']
-            state['model_answer'] = '这是一个很好的回答示例。'
+            response = await llm.with_structured_output(AssessmentResult)
+            res=response.json()
+            state['score'] = res["score"]
+            state['strengths'] = res["strengths"]
+            state['weaknesses'] = res["weaknesses"]
+            state['suggestions'] = res["suggestions"]
+            state['model_answer'] = res["model_answer"]
         except Exception as e:
             logger.error(f"评估回答失败: {e}")
-            state['score'] = 70
+            state['score'] = 60
         return state
 
     graph = StateGraph(EvaluatorState)

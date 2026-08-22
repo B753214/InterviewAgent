@@ -1,3 +1,4 @@
+import asyncio
 import logging
 
 from langgraph.graph import StateGraph, START, END
@@ -50,6 +51,7 @@ def _route_after_router(state: InterviewState) -> str:
     return "interviewer"
 
 if __name__ == "__main__":
-    graph = build_interview_graph()
-    res=graph.invoke({"interview_id": "test_id", "position_name": "agent开发工程师"})
-    print(res)
+    # graph = build_interview_graph()
+    # res=graph.ainvoke({})
+    # print(res)
+    asyncio.run(build_interview_graph())
