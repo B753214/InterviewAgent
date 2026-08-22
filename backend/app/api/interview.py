@@ -3,7 +3,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.agent.evaluator.graph import run_evaluator_agent
 from backend.app.agent.interviewer.graph import run_interview_agent
-from backend.app.agent.state import InterviewerState
+from backend.app.agent.state import IntervieweState
 
 router=APIRouter(prefix='/api/v1/interviews')
 

@@ -2,59 +2,54 @@ import logging
 
 from langgraph.graph import StateGraph, START, END
 
-from backend.app.agent.state import InterviewerState
+from backend.app.agent.interviewer.assessment import assessment_node
+from backend.app.agent.interviewer.memory_updater import memory_updater_node
+from interviewer import interviewer_node
+from question_router import question_router_node
+from initiallizer import initialize_node
+from backend.app.agent.state import InterviewState
 
 logger = logging.getLogger(__name__)
 
-def create_interview():
-    async def generate_question(state):
-        logging.info(f"生成第{state['current_round']}轮问题")
-        state['current_question'] = f"请回答关于{state['position_name']}的问题"
-        state['question_type'] = "technical"
-        return state
+TOPIC_POOL = [
+    "技术栈与项目经验",
+    "系统设计",
+    "数据库与存储",
+    "编程基础与算法",
+    "架构与设计模式",
+    "团队协作与流程",
+]
 
-    async def check_complete(state):
-        if state['current_round'] >= state['total_rounds']:
-            state['interview_complete'] = True
-        return state
-    async def generate_response(state):
-        if state['interview_complete']:
-            state['response'] = "面试结束"
-        else:
-            state['response'] = f"第{state['current_round']}轮问题：{state['current_question']}"
-            return state
-    graph=StateGraph(InterviewerState)
-    graph.add_node("generate_question", generate_question)
-    graph.add_node("check_complete", check_complete)
-    graph.add_node("generate_response", generate_response)
+def build_interview_graph()->StateGraph:
 
-    graph.add_edge(START,"generate_question")
-    graph.add_edge("generate_question", "check_complete")
-    graph.add_edge("check_complete", "generate_response")
-    graph.add_edge("generate_response", END)
+    graph=StateGraph(InterviewState)
+    graph.add_node("initializer", initialize_node)
+    graph.add_node("question_router", question_router_node)
+    graph.add_node("interviewer", interviewer_node)
+    graph.add_node("assessment", assessment_node)
+    graph.add_node("memory_updater", memory_updater_node)
+    graph.add_edge(START, "initializer")
+    graph.add_edge("initializer", "question_router")
+    graph.add_conditional_edges(
+        "question_router",
+        _route_after_router,
+        {
+            "interviewer": "interviewer",
+            "assessment": "assessment",
+        },
+    )
+    graph.add_edge("interviewer", END)
+    graph.add_edge("assessment", "memory_updater")
+    graph.add_edge("memory_updater", END)
     return graph.compile()
 
-_interview = None
-
-def get_interviewer_agent():
-    global _interview
-    if _interview is None:
-        _interview = create_interview()
-    return _interview
-
-async def run_interview_agent(**kwargs):
-    agent = get_interviewer_agent()
-    state=InterviewerState(
-        interview_id=kwargs.get("interview_id"),
-        user_id=kwargs.get("user_id"),
-        interview_type=kwargs.get("interview_type", "mixed"),
-        position_name=kwargs.get("position_name", ''),
-        current_round=1,
-        total_round=5,
-        interview_complete=False,
-    )
-    result = await agent.ainvoke(state)
-    return result
+def _route_after_router(state: InterviewState) -> str:
+    action = state.get("action", "initial_question")
+    if action == "assess":
+        return "assessment"
+    return "interviewer"
 
 if __name__ == "__main__":
-    run_interview_agent()
+    graph = build_interview_graph()
+    res=graph.invoke({"interview_id": "test_id", "position_name": "agent开发工程师"})
+    print(res)

@@ -23,7 +23,7 @@ class interview(Base):
 class QAPair(Base):
     __tablename__ = "qa_pair"
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    interview_id = Column(UUID(as_uuid=True), ForeignKey("interviews.id"))
+    interview_id = Column(UUID(as_uuid=True), ForeignKey("interview.id"))
     question_number = Column(Integer)
     question_content = Column(Text)
     answer_content = Column(Text)
