@@ -25,3 +25,10 @@ class JobAnalysisResult(BaseModel):
     must_have_skills_json: list[str] = Field(default_factory=list, description="核心要求")
     domain: str = Field(default="", description="业务领域")
     level: str = Field(default="", description="岗位级别")
+
+
+class ResumeAnalysisResult(BaseModel):
+    summary: str = Field(default="", description="简历摘要")
+    skills_json: dict[str, list[str]] = Field(default_factory=dict, description="技能分类")
+    project_highlights: list[str] = Field(default_factory=list, description="项目亮点")
+    potential_questions_json: list[str] = Field(default_factory=list, description="潜在面试题")

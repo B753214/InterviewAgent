@@ -18,6 +18,8 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
             await session.close()
 async def init_db():
     import backend.app.models.interview_session  # noqa: F401
+    import backend.app.models.job_profile  # noqa: F401
+    import backend.app.models.resume_profile  # noqa: F401
 
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)

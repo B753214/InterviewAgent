@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.agent.interviewer.graph import run_interview_workflow
 from backend.app.models.interview_session import InterviewSessionORM
-from backend.app.services import memory_service
+from backend.app.services import job_service, memory_service, resume_service
 
 
 class InterviewCreate(BaseModel):
@@ -112,7 +112,27 @@ async def _save_session(db: AsyncSession, session: InterviewSession) -> None:
             setattr(row, key, value)
     await db.commit()
 
-def _session_to_graph_state(session: InterviewSession) -> dict:
+async def _load_profiles(
+    db: AsyncSession,
+    session: InterviewSession,
+) -> tuple[dict | None, dict | None]:
+    resume_profile = None
+    job_profile = None
+
+    if session.resume_profile_id:
+        resume = await resume_service.get_resume(db, session.resume_profile_id)
+        if resume is not None:
+            resume_profile = resume.model_dump()
+
+    if session.job_profile_id:
+        job = await job_service.get_job(db, session.job_profile_id)
+        if job is not None:
+            job_profile = job.model_dump()
+
+    return resume_profile, job_profile
+
+
+async def _session_to_graph_state(db: AsyncSession, session: InterviewSession) -> dict:
     messages = []
     for message in session.messages:
         if message["role"] == "user":
@@ -120,10 +140,12 @@ def _session_to_graph_state(session: InterviewSession) -> dict:
         elif message["role"] == "interviewer":
             messages.append(AIMessage(content=message["content"]))
 
+    resume_profile, job_profile = await _load_profiles(db, session)
+
     return {
         "session_id": session.id,
-        "resume_profile": None,
-        "job_profile": None,
+        "resume_profile": resume_profile,
+        "job_profile": job_profile,
         "selected_material_ids": session.selected_material_ids,
         "retrieved_context": session.retrieved_context,
         "weakness_memory": memory_service.list_weakness_memories(limit=5),
@@ -171,7 +193,7 @@ def _graph_state_to_session(state: dict, session: InterviewSession) -> None:
 
 
 async def _run_and_persist(db: AsyncSession, session: InterviewSession, graph_state: dict | None = None) -> InterviewSession:
-    state = graph_state or _session_to_graph_state(session)
+    state = graph_state or await _session_to_graph_state(db, session)
     result = await run_interview_workflow(state)
     _graph_state_to_session(result, session)
     await _save_session(db, session)
