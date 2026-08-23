@@ -61,3 +61,35 @@ async def submit_answer(
     except Exception as exc:
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+@router.post("/{session_id}/finish")
+async def finish_interview(
+    session_id: str,
+    db: AsyncSession = Depends(get_db),
+):
+    try:
+        event = await interview_service.finish_interview(db, session_id)
+        if event.event == "error":
+            raise HTTPException(status_code=400, detail=str(event.data))
+        return event
+    except HTTPException:
+        raise
+    except Exception as exc:
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+@router.post("/{session_id}/assess")
+async def reassess_interview(
+    session_id: str,
+    db: AsyncSession = Depends(get_db),
+):
+    try:
+        event = await interview_service.reassess_interview(db, session_id)
+        if event.event == "error":
+            raise HTTPException(status_code=400, detail=str(event.data))
+        return event
+    except HTTPException:
+        raise
+    except Exception as exc:
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(exc)) from exc

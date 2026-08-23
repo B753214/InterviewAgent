@@ -1,13 +1,19 @@
 """
-Long-term memory service (in-memory store for now).
+Long-term memory service: SQLite persistence with decay and review scheduling.
 """
 from __future__ import annotations
 
 import math
 import uuid
-from datetime import datetime
+from contextlib import asynccontextmanager
+from datetime import datetime, timedelta
 
-_MEMORY_STORE: list[dict] = []
+from sqlalchemy import delete, select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from backend.app.database import AsyncSessionLocal
+from backend.app.models.interview_session import InterviewSessionORM
+from backend.app.models.knowledge_memory import KnowledgeMemoryORM
 
 HALF_LIFE_DAYS = {"low": 3, "mid": 7, "high": 21}
 MASTERY_ADJUST = {
@@ -18,6 +24,84 @@ MASTERY_ADJUST = {
     "unknown": -0.18,
 }
 WEAK_PERFORMANCES = {"wrong", "vague", "unknown"}
+
+
+@asynccontextmanager
+async def _db_scope(db: AsyncSession | None):
+    if db is not None:
+        yield db
+        return
+    async with AsyncSessionLocal() as session:
+        try:
+            yield session
+            await session.commit()
+        except Exception:
+            await session.rollback()
+            raise
+
+
+def _calc_next_review(score: float, tested_at: str | None = None) -> datetime:
+    if score < 0.4:
+        days = 1
+    elif score < 0.6:
+        days = 3
+    elif score < 0.8:
+        days = 7
+    else:
+        days = 21
+
+    base = datetime.now()
+    if tested_at:
+        base = datetime.fromisoformat(tested_at).replace(tzinfo=None)
+    return base + timedelta(days=days)
+
+
+def _new_memory_record(
+    update: dict,
+    perf: str,
+    delta: float,
+    interview_id: str,
+    tested_at: str,
+) -> dict:
+    new_score = round(max(0.0, min(1.0, 0.5 + delta)), 4)
+    evidence = []
+    if interview_id:
+        evidence.append({
+            "interview_id": interview_id,
+            "performance": perf,
+            "timestamp": tested_at,
+            "evidence": update.get("evidence", ""),
+        })
+
+    return {
+        "id": str(uuid.uuid4()),
+        "topic": update.get("topic", ""),
+        "category": update.get("category", ""),
+        "mastery_score": new_score,
+        "exposure_count": 1,
+        "weakness_count": 1 if perf in WEAK_PERFORMANCES else 0,
+        "last_tested_at": tested_at,
+        "next_review_at": _calc_next_review(new_score, tested_at).isoformat(),
+        "evidence_json": evidence,
+        "source_interview_ids": [interview_id] if interview_id else [],
+        "updated_at": datetime.now().isoformat(),
+    }
+
+
+def _orm_to_dict(row: KnowledgeMemoryORM) -> dict:
+    return {
+        "id": row.id,
+        "topic": row.topic,
+        "mastery_score": row.mastery_score,
+        "exposure_count": row.exposure_count,
+        "weakness_count": row.weakness_count,
+        "next_review_at": row.next_review_at,
+        "updated_at": row.updated_at,
+        "last_tested_at": row.last_tested_at,
+        "category": row.category,
+        "evidence_json": row.evidence_json or [],
+        "source_interview_ids": row.source_interview_ids or [],
+    }
 
 
 def _get_half_life(score: float) -> int:
@@ -42,71 +126,171 @@ def _apply_decay(memory: dict) -> None:
     memory["mastery_score"] = round(max(0.0, min(1.0, memory["mastery_score"] * decay)), 4)
 
 
-def list_memories(sort_by: str = "mastery_score") -> list[dict]:
-    memories = [dict(m) for m in _MEMORY_STORE]
-    for m in memories:
-        _apply_decay(m)
+async def list_memories(
+    sort_by: str = "mastery_score",
+    *,
+    db: AsyncSession | None = None,
+) -> list[dict]:
+    async with _db_scope(db) as session:
+        result = await session.execute(select(KnowledgeMemoryORM))
+        memories = [_orm_to_dict(row) for row in result.scalars().all()]
+
+    for memory in memories:
+        _apply_decay(memory)
     reverse = sort_by in ("mastery_score", "exposure_count")
-    return sorted(memories, key=lambda m: m.get(sort_by, 0), reverse=reverse)
+    return sorted(memories, key=lambda item: item.get(sort_by, 0), reverse=reverse)
 
 
-def list_weakness_memories(limit: int = 5) -> list[dict]:
-    memories = list_memories(sort_by="mastery_score")
+async def list_weakness_memories(
+    limit: int = 5,
+    *,
+    db: AsyncSession | None = None,
+) -> list[dict]:
+    memories = await list_memories(sort_by="mastery_score", db=db)
     candidates = [
-        m for m in memories
-        if m.get("weakness_count", 0) > 0 or m.get("mastery_score", 1.0) < 0.6
+        memory for memory in memories
+        if memory.get("weakness_count", 0) > 0 or memory.get("mastery_score", 1.0) < 0.6
     ]
-    candidates.sort(key=lambda m: (
-        m.get("mastery_score", 1.0),
-        -m.get("weakness_count", 0),
-        m.get("next_review_at") or "",
+    candidates.sort(key=lambda memory: (
+        memory.get("mastery_score", 1.0),
+        -memory.get("weakness_count", 0),
+        memory.get("next_review_at") or "",
     ))
     return candidates[:limit]
 
 
-def _find_memory_by_topic(topic: str) -> dict | None:
-    for m in _MEMORY_STORE:
-        if m.get("topic") == topic:
-            return m
-    return None
+async def _find_memory_by_topic(
+    db: AsyncSession,
+    topic: str,
+) -> KnowledgeMemoryORM | None:
+    result = await db.execute(
+        select(KnowledgeMemoryORM).where(KnowledgeMemoryORM.topic == topic)
+    )
+    return result.scalar_one_or_none()
 
 
-def apply_memory_updates(
+def _merge_existing_memory(
+    memory: dict,
+    update: dict,
+    perf: str,
+    delta: float,
+    interview_id: str,
+    tested_at: str,
+) -> bool:
+    evidence = memory.get("evidence_json") or []
+    if interview_id and any(item.get("interview_id") == interview_id for item in evidence):
+        return False
+
+    new_score = round(max(0.0, min(1.0, memory.get("mastery_score", 0.5) + delta)), 4)
+    if interview_id:
+        evidence.append({
+            "interview_id": interview_id,
+            "performance": perf,
+            "timestamp": tested_at,
+            "evidence": update.get("evidence", ""),
+        })
+
+    memory["mastery_score"] = new_score
+    memory["exposure_count"] = memory.get("exposure_count", 0) + 1
+    if perf in WEAK_PERFORMANCES:
+        memory["weakness_count"] = memory.get("weakness_count", 0) + 1
+    memory["last_tested_at"] = tested_at
+    memory["next_review_at"] = _calc_next_review(new_score, tested_at).isoformat()
+    memory["evidence_json"] = evidence[-20:]
+    memory["category"] = update.get("category") or memory.get("category", "")
+    memory["updated_at"] = datetime.now().isoformat()
+    memory["source_interview_ids"] = [
+        item["interview_id"] for item in evidence if item.get("interview_id")
+    ][-20:]
+    return True
+
+
+def _apply_dict_to_row(row: KnowledgeMemoryORM, payload: dict) -> None:
+    row.mastery_score = payload["mastery_score"]
+    row.exposure_count = payload["exposure_count"]
+    row.weakness_count = payload["weakness_count"]
+    row.last_tested_at = payload.get("last_tested_at")
+    row.next_review_at = payload.get("next_review_at")
+    row.evidence_json = payload.get("evidence_json", [])
+    row.source_interview_ids = payload.get("source_interview_ids", [])
+    row.category = payload.get("category", "")
+    row.updated_at = payload.get("updated_at", datetime.now().isoformat())
+
+
+async def apply_memory_updates(
     memory_updates: list[dict],
     *,
     interview_id: str,
     tested_at: str | None = None,
+    db: AsyncSession | None = None,
 ) -> None:
     if not memory_updates:
         return
 
     tested_at = tested_at or datetime.now().isoformat()
-    for update in memory_updates:
-        topic = update.get("topic", "")
-        if not topic:
-            continue
+    async with _db_scope(db) as session:
+        for update in memory_updates:
+            topic = update.get("topic", "")
+            if not topic:
+                continue
 
-        perf = update.get("performance", "adequate")
-        delta = MASTERY_ADJUST.get(perf, 0.0)
-        existing = _find_memory_by_topic(topic)
+            perf = update.get("performance", "adequate")
+            delta = MASTERY_ADJUST.get(perf, 0.0)
+            existing = await _find_memory_by_topic(session, topic)
 
-        if existing:
-            score = max(0.0, min(1.0, existing.get("mastery_score", 0.5) + delta))
-            existing["mastery_score"] = round(score, 4)
-            existing["exposure_count"] = existing.get("exposure_count", 0) + 1
-            existing["last_tested_at"] = tested_at
-            if perf in WEAK_PERFORMANCES:
-                existing["weakness_count"] = existing.get("weakness_count", 0) + 1
-        else:
-            score = max(0.0, min(1.0, 0.5 + delta))
-            _MEMORY_STORE.append({
-                "id": str(uuid.uuid4()),
-                "topic": topic,
-                "category": update.get("category", "general"),
-                "mastery_score": round(score, 4),
-                "exposure_count": 1,
-                "weakness_count": 1 if perf in WEAK_PERFORMANCES else 0,
-                "last_tested_at": tested_at,
-                "next_review_at": tested_at,
-                "evidence_json": [{"interview_id": interview_id, "evidence": update.get("evidence", "")}],
-            })
+            if existing is not None:
+                payload = _orm_to_dict(existing)
+                merged = _merge_existing_memory(
+                    payload, update, perf, delta, interview_id, tested_at
+                )
+                if not merged:
+                    continue
+                _apply_dict_to_row(existing, payload)
+            else:
+                payload = _new_memory_record(
+                    update, perf, delta, interview_id, tested_at
+                )
+                session.add(KnowledgeMemoryORM(**payload))
+
+
+async def rebuild_memories_from_interviews(
+    *,
+    db: AsyncSession | None = None,
+)-> dict:
+    async with _db_scope(db) as session:
+        await session.execute(delete(KnowledgeMemoryORM))
+        result = await session.execute(
+            select(InterviewSessionORM)
+            .where(InterviewSessionORM.status == "ended")
+            .order_by(InterviewSessionORM.created_at.asc())
+        )
+        interviews = result.scalars().all()
+        interview_count = len(interviews)
+        success_count = 0
+        failure_count = 0
+        update_count = 0
+
+        for interview in interviews:
+            if interview.assessment_status != "success" or not interview.memory_updates:
+                failure_count += 1
+                continue
+
+            await apply_memory_updates(
+                interview.memory_updates,
+                interview_id=interview.id,
+                tested_at=interview.created_at,
+                db=session,
+            )
+            update_count += len(interview.memory_updates)
+            success_count += 1
+
+        count_result = await session.execute(select(KnowledgeMemoryORM))
+        memory_count = len(count_result.scalars().all())
+
+    return {
+        "interview_count": interview_count,
+        "success_count": success_count,
+        "failure_count": failure_count,
+        "memory_update_count": update_count,
+        "memory_count": memory_count,
+    }

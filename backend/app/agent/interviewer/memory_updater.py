@@ -7,7 +7,7 @@ async def memory_updater_node(state: InterviewState) -> dict:
     if not memory_updates:
         return {}
 
-    memory_service.apply_memory_updates(
+    await memory_service.apply_memory_updates(
         memory_updates,
         interview_id=state.get("session_id", ""),
     )

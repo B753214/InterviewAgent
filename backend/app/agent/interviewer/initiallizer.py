@@ -17,7 +17,7 @@ async def initialize_node(state: InterviewState) -> dict:
 
     resume = state.get("resume_profile")
     job = state.get("job_profile")
-    weakness_memory = memory_service.list_weakness_memories(limit=5)
+    weakness_memory = await memory_service.list_weakness_memories(limit=5)
     first_topic = state.get("current_topic") or _pick_initial_topic(job, resume, weakness_memory)
 
     return {

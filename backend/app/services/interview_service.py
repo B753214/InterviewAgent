@@ -5,52 +5,16 @@ import uuid
 from datetime import datetime
 
 from langchain_core.messages import AIMessage, HumanMessage
-from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.agent.interviewer.graph import run_interview_workflow
+from backend.app.agent.schemas.interview import InterviewCreate, InterviewEvent, InterviewSession
 from backend.app.models.interview_session import InterviewSessionORM
 from backend.app.services import job_service, memory_service, resume_service
 
 
-class InterviewCreate(BaseModel):
-    resume_profile_id: str | None = None
-    job_profile_id: str | None = None
-    material_ids: list[str] = Field(default_factory=list)
-    max_rounds: int = Field(default=8, ge=2, le=20)
-
-
-class InterviewSession(BaseModel):
-    id: str
-    resume_profile_id: str | None = None
-    job_profile_id: str | None = None
-    selected_material_ids: list[str] = Field(default_factory=list)
-    status: str = "active"
-    messages: list[dict] = Field(default_factory=list)
-    current_topic: str | None = None
-    covered_topics: list[str] = Field(default_factory=list)
-    follow_up_count: int = 0
-    unclear_count: int = 0
-    current_round: int = 0
-    max_rounds: int = 8
-    assessment: dict | None = None
-    assessment_status: str = "pending"
-    assessment_error: str = ""
-    memory_updates: list[dict] = Field(default_factory=list)
-    router_source: str = ""
-    retrieved_context: list[dict] = Field(default_factory=list)
-    created_at: str = Field(default_factory=lambda: datetime.now().isoformat())
-    ended_at: str | None = None
-
-
-class InterviewEvent(BaseModel):
-    event: str
-    data: str | dict | None = None
-
-
-
-async def create_session(db: AsyncSession,data: InterviewCreate) -> InterviewSession:
+async def create_session(db: AsyncSession, data: InterviewCreate) -> InterviewSession:
     session = InterviewSession(
         id=str(uuid.uuid4()),
         resume_profile_id=data.resume_profile_id,
@@ -148,7 +112,7 @@ async def _session_to_graph_state(db: AsyncSession, session: InterviewSession) -
         "job_profile": job_profile,
         "selected_material_ids": session.selected_material_ids,
         "retrieved_context": session.retrieved_context,
-        "weakness_memory": memory_service.list_weakness_memories(limit=5),
+        "weakness_memory": await memory_service.list_weakness_memories(limit=5),
         "messages": messages,
         "current_topic": session.current_topic,
         "covered_topics": session.covered_topics,
@@ -243,6 +207,39 @@ async def submit_answer(db: AsyncSession, session: InterviewSession, answer: str
 
     return InterviewEvent(event="message_end", data=_last_interviewer_message(session))
 
+async def finish_interview(db: AsyncSession, session_id: str) -> InterviewEvent:
+    session = await get_session(db, session_id)
+    if session is None:
+        return InterviewEvent(event="error", data="Session not found")
+    if session.status != "active":
+        return InterviewEvent(event="error", data="Session already ended")
+    session.messages.append({"role": "user", "content": "结束面试"})
+    state=await _session_to_graph_state(db, session)
+    state["current_round"] = session.max_rounds
+    state["action"]="assess"
+    session=await _run_and_persist(db, session, graph_state=state)
+    return InterviewEvent(event="assessment", data=session.assessment)
+
+async def reassess_interview(db: AsyncSession, session_id: str) -> InterviewEvent:
+    session = await get_session(db, session_id)
+    if session is None:
+        return InterviewEvent(event="error", data="Session not found")
+    state = await _session_to_graph_state(db, session)
+    state["current_round"] = session.max_rounds
+    state["action"] = "assess"
+    session = await _run_and_persist(db, session, graph_state=state)
+    if session.assessment_status != "success":
+        return InterviewEvent(
+            event="error",
+            data=session.assessment_error or "Assessment failed",
+        )
+    if session.memory_updates:
+        await memory_service.apply_memory_updates(
+            session.memory_updates,
+            interview_id=session.id,
+            tested_at=session.created_at,
+        )
+    return InterviewEvent(event="assessment", data=session.assessment)
 
 async def get_report(db: AsyncSession, session_id: str) -> dict | None:
     session = await get_session(db, session_id)
