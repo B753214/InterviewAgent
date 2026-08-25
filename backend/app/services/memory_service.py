@@ -4,6 +4,7 @@ Long-term memory service: SQLite persistence with decay and review scheduling.
 from __future__ import annotations
 
 import math
+import time
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
@@ -24,6 +25,9 @@ MASTERY_ADJUST = {
     "unknown": -0.18,
 }
 WEAK_PERFORMANCES = {"wrong", "vague", "unknown"}
+
+_WEAKNESS_CACHE_TTL = 30
+_weakness_cache: dict[str, tuple[float, list[dict]]] = {}
 
 
 @asynccontextmanager
@@ -146,6 +150,11 @@ async def list_weakness_memories(
     *,
     db: AsyncSession | None = None,
 ) -> list[dict]:
+    cache_key = f"weakness:{limit}"
+    now = time.monotonic()
+    cached = _weakness_cache.get(cache_key)
+    if cached is not None and now - cached[0] < _WEAKNESS_CACHE_TTL:
+        return cached[1]
     memories = await list_memories(sort_by="mastery_score", db=db)
     candidates = [
         memory for memory in memories
@@ -156,7 +165,9 @@ async def list_weakness_memories(
         -memory.get("weakness_count", 0),
         memory.get("next_review_at") or "",
     ))
-    return candidates[:limit]
+    result = candidates[:limit]
+    _weakness_cache[cache_key] = (now, result)
+    return result
 
 
 async def _find_memory_by_topic(
@@ -227,6 +238,7 @@ async def apply_memory_updates(
     if not memory_updates:
         return
 
+    _weakness_cache.clear()
     tested_at = tested_at or datetime.now().isoformat()
     async with _db_scope(db) as session:
         for update in memory_updates:
@@ -257,6 +269,7 @@ async def rebuild_memories_from_interviews(
     *,
     db: AsyncSession | None = None,
 )-> dict:
+    _weakness_cache.clear()
     async with _db_scope(db) as session:
         await session.execute(delete(KnowledgeMemoryORM))
         result = await session.execute(

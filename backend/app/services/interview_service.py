@@ -193,7 +193,6 @@ async def generate_first_question(db: AsyncSession, session: InterviewSession) -
 
 
 async def submit_answer(db: AsyncSession, session: InterviewSession, answer: str) -> InterviewEvent:
-    session = await get_session(db, session.id )
     if session is None:
         return InterviewEvent(event="error", data="Session not found")
     if session.status != "active":
