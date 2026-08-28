@@ -41,6 +41,12 @@ app.include_router(material_router, prefix="/materials")
 async def root():
     return {"name": settings.APP_NAME, "version": settings.APP_VERSION}
 
+
+@app.get("/health")
+async def health():
+    return {"status": "ok", "name": settings.APP_NAME, "version": settings.APP_VERSION}
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)

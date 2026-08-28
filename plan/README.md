@@ -89,7 +89,7 @@ M6 ██████████ 100%  Next.js 前端 + 真流式 SSE + Mock LL
 | # | 任务 | 说明 |
 |---|------|------|
 | 1 | PDF vision + 异步队列 | 扫描件识别、`/queue/status`、`/reprocess` |
-| 2 | `GET /health` | 探活 |
+| 2 | `GET /health` | ~~探活~~ **已完成** |
 | 3 | markdown 落盘 | 简历/报告写 `.md` 产物 |
 | 4 | 多用户 / 认证 | 两边均可后置 |
 | 5 | 自动化测试 | 冒烟 / API 测试 |

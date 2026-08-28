@@ -33,7 +33,6 @@ flowchart LR
     YWeb[Next 前端 ✅]
   end
   ref -.->|"二期可选"| Vision[PDF vision/queue]
-  ref -.->|"二期可选"| Health[/health]
 ```
 
 ---
@@ -62,7 +61,7 @@ flowchart LR
 | 缺口 | 参考 | 本仓库 | 优先级 |
 |------|------|--------|--------|
 | PDF vision / 异步队列 | `vision_service` + `material_queue` | 仅 pypdf 文本层；扫描件会 failed | P2 |
-| `GET /health` | 有 | 无 | P2 |
+| `GET /health` | 有 | **已对齐** | — |
 | markdown 落盘 | `markdown_store` | 无 | P2 |
 | `/materials/reprocess` | 有 | 无 | P2 |
 | 多用户 / 认证 | 无（同） | 无 | 可后置 |

@@ -62,7 +62,7 @@ flowchart TD
 | 模块 | 现状 | 说明 |
 |------|------|------|
 | **PDF vision / queue** | 未做 | 扫描件、异步处理、reprocess |
-| **`GET /health`** | 未做 | 探活 |
+| **`GET /health`** | **已完成** | 探活 |
 | **markdown 落盘** | 未做 | 报告 / 画像写文件 |
 | **认证** | 未做 | 单用户演示足够 |
 
@@ -87,7 +87,7 @@ flowchart TD
 | # | 任务 | 改哪里 | 状态 |
 |---|------|--------|------|
 | 1 | PDF vision + 异步队列 | `vision_service` / `material_queue` | 未做 |
-| 2 | `GET /health` | `main.py` | 未做 |
+| 2 | `GET /health` | `main.py` | **已完成** |
 | 3 | markdown 落盘 | `markdown_store` | 未做 |
 | 4 | `/materials/reprocess` | materials API | 未做 |
 

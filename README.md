@@ -50,6 +50,7 @@ uvicorn main:app --reload --host 0.0.0.0 --port 8000
 | 方法 | 路径 | 说明 |
 |------|------|------|
 | GET | `/` | 服务信息 |
+| GET | `/health` | 健康检查 |
 | GET/POST | `/interviews` | 列表 / 创建面试 |
 | GET | `/interviews/{id}` | 会话详情 |
 | GET | `/interviews/{id}/report` | 评估报告 |
