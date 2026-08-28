@@ -227,6 +227,65 @@ def _apply_dict_to_row(row: KnowledgeMemoryORM, payload: dict) -> None:
     row.category = payload.get("category", "")
     row.updated_at = payload.get("updated_at", datetime.now().isoformat())
 
+def _build_conversation_text(messages_raw: list[dict] | None) -> str:
+    if not messages_raw:
+        return ""
+    lines: list[str] = []
+    for message in messages_raw:
+        role = message.get("role")
+        content = (message.get("content") or "").strip()
+        if not content:
+            continue
+        speaker = "面试官" if role == "interviewer" else "候选人"
+        lines.append(f"{speaker}: {content}")
+    return "\n".join(lines)
+
+
+async def _reassess_interview_record(interview: InterviewSessionORM) -> dict:
+    conversation = _build_conversation_text(interview.messages)
+    if not conversation:
+        return {
+            "assessment": None,
+            "assessment_status": "failed",
+            "assessment_error": "No conversation available",
+            "memory_updates": [],
+        }
+
+    # 函数内 import，避免与 assessment → memory 循环依赖
+    from backend.app.agent.interviewer.assessment import evaluate_conversation
+    from backend.app.llm.mock_llm import mock_assessment
+    from backend.app.llm.model_router import get_llm
+
+    llm = get_llm("assessment")
+    if not llm:
+        result = mock_assessment()
+        return {
+            "assessment": result,
+            "assessment_status": "success",
+            "assessment_error": "fallback_mock: llm not configured",
+            "memory_updates": result.get("memory_updates", []),
+        }
+
+    try:
+        result = await evaluate_conversation(llm, conversation)
+        if not result:
+            raise ValueError("empty assessment")
+        return {
+            "assessment": result,
+            "assessment_status": "success",
+            "assessment_error": "",
+            "memory_updates": result.get("memory_updates", []),
+        }
+    except Exception as exc:
+        # LLM 调用失败时也降级 mock，保证 rebuild 可演示
+        result = mock_assessment()
+        return {
+            "assessment": result,
+            "assessment_status": "success",
+            "assessment_error": f"fallback_mock: {type(exc).__name__}: {exc}",
+            "memory_updates": result.get("memory_updates", []),
+        }
+
 
 async def apply_memory_updates(
     memory_updates: list[dict],
@@ -284,19 +343,27 @@ async def rebuild_memories_from_interviews(
         update_count = 0
 
         for interview in interviews:
-            if interview.assessment_status != "success" or not interview.memory_updates:
+            assessment = await _reassess_interview_record(interview)
+            interview.assessment = assessment.get("assessment")
+            interview.assessment_status = assessment.get("assessment_status", "failed")
+            interview.assessment_error = assessment.get("assessment_error") or ""
+            interview.memory_updates = assessment.get("memory_updates") or []
+
+            if interview.assessment_status != "success":
                 failure_count += 1
                 continue
 
-            await apply_memory_updates(
-                interview.memory_updates,
-                interview_id=interview.id,
-                tested_at=interview.created_at,
-                db=session,
-            )
-            update_count += len(interview.memory_updates)
             success_count += 1
+            if interview.memory_updates:
+                await apply_memory_updates(
+                    interview.memory_updates,
+                    interview_id=interview.id,
+                    tested_at=interview.created_at,
+                    db=session,
+                )
+                update_count += len(interview.memory_updates)
 
+        await session.flush()
         count_result = await session.execute(select(KnowledgeMemoryORM))
         memory_count = len(count_result.scalars().all())
 

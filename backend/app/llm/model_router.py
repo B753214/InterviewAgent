@@ -31,6 +31,11 @@ def _llm_credentials() -> tuple[str, str, str] | None:
     return None
 
 
+def is_llm_available() -> bool:
+    """True when DEFAULT_LLM_* credentials are fully configured."""
+    return _llm_credentials() is not None
+
+
 def get_llm(agent: str):
     creds = _llm_credentials()
     if not creds:

@@ -2,6 +2,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 
 from backend.app.agent.schemas.llm_output import RouterDecision
 from backend.app.agent.state import InterviewState
+from backend.app.llm.mock_llm import mock_router_decision
 from backend.app.llm.model_router import get_llm, log_llm_failure, log_llm_success, now_ms
 
 
@@ -65,27 +66,29 @@ async def question_router_node(state: InterviewState) -> dict:
     max_rounds = state.get("max_rounds", 8)
 
     llm = get_llm("question_router")
-    if not llm:
-        raise RuntimeError("question_router LLM is not configured")
+    if llm:
+        started_ms = now_ms()
+        structured_llm = llm.with_structured_output(RouterDecision)
+        try:
+            decision = await structured_llm.ainvoke([
+                SystemMessage(content=(
+                    "你是面试路由器。根据用户最新回答，决定下一步动作。\n"
+                    f"当前轮次: {current_round}/{max_rounds}, 追问次数: {follow_up_count}\n"
+                    "规则: 回答含糊→follow_up, 回答充分→switch_topic, 达到最大轮次→assess\n"
+                    "用户连续说不知道→switch_topic, follow_up_count>=3→switch_topic"
+                )),
+                HumanMessage(content=latest_answer),
+            ])
+            if not decision:
+                raise ValueError("empty structured response")
+            log_llm_success("question_router", started_ms)
+            return _apply_decision(
+                decision, follow_up_count, unclear_count, current_round, max_rounds, "llm"
+            )
+        except Exception as exc:
+            log_llm_failure("question_router", exc, started_ms)
 
-    started_ms = now_ms()
-    structured_llm = llm.with_structured_output(RouterDecision)
-    try:
-        decision = await structured_llm.ainvoke([
-            SystemMessage(content=(
-                "你是面试路由器。根据用户最新回答，决定下一步动作。\n"
-                f"当前轮次: {current_round}/{max_rounds}, 追问次数: {follow_up_count}\n"
-                "规则: 回答含糊→follow_up, 回答充分→switch_topic, 达到最大轮次→assess\n"
-                "用户连续说不知道→switch_topic, follow_up_count>=3→switch_topic"
-            )),
-            HumanMessage(content=latest_answer),
-        ])
-        if not decision:
-            raise ValueError("empty structured response")
-        log_llm_success("question_router", started_ms)
-        return _apply_decision(
-            decision, follow_up_count, unclear_count, current_round, max_rounds, "llm"
-        )
-    except Exception as exc:
-        log_llm_failure("question_router", exc, started_ms)
-        raise
+    decision = mock_router_decision(latest_answer, follow_up_count, current_round, max_rounds)
+    return _apply_decision(
+        decision, follow_up_count, unclear_count, current_round, max_rounds, "mock"
+    )
