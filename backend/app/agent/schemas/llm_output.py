@@ -1,5 +1,6 @@
-from pydantic import BaseModel, Field
 from typing import Literal
+
+from pydantic import BaseModel, Field
 
 class RouterDecision(BaseModel):
     action: Literal["follow_up", "switch_topic", "assess"] = Field(description="下一步动作: 追问、切题或进入评估")

@@ -1,8 +1,9 @@
 import uuid
 
-from app.database import Base
-from sqlalchemy import UUID, Column, String, Boolean
+from sqlalchemy import Boolean, Column, String, UUID
 from sqlalchemy.orm import relationship
+
+from backend.app.database import Base
 
 
 class User(Base):

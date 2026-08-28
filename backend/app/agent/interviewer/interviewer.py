@@ -1,9 +1,10 @@
+from collections.abc import AsyncIterator
+
 from langchain_core.messages import AIMessage, SystemMessage
 
 from backend.app.agent.state import InterviewState
 from backend.app.llm.model_router import get_llm, log_llm_failure, log_llm_success, now_ms
 from backend.app.rag.retrieval import format_context, retrieve_material_context
-
 
 def _retrieve_context(topic: str, state: InterviewState) -> list[dict]:
     material_ids = state.get("selected_material_ids", [])
@@ -46,6 +47,19 @@ def _build_system_prompt(action: str, topic: str, context: str, weakness_memory:
     base += "\n\n只输出问题本身，不要加任何说明文字。"
     return base
 
+def _build_prompt_messages(
+    action: str,
+    topic: str,
+    context: str,
+    messages: list,
+    weakness_memory: list[dict],
+) -> list:
+    system_prompt = _build_system_prompt(action, topic, context, weakness_memory)
+    prompt_messages = [SystemMessage(content=system_prompt)]
+    for message in messages[-6:]:
+        prompt_messages.append(message)
+    return prompt_messages
+
 
 async def _generate_with_llm(
     llm,
@@ -55,34 +69,61 @@ async def _generate_with_llm(
     messages: list,
     weakness_memory: list[dict],
 ) -> str:
-    system_prompt = _build_system_prompt(action, topic, context, weakness_memory)
-    prompt_messages = [SystemMessage(content=system_prompt)]
-    for message in messages[-6:]:
-        prompt_messages.append(message)
+    # system_prompt = _build_system_prompt(action, topic, context, weakness_memory)
+    # prompt_messages = [SystemMessage(content=system_prompt)]
+    # for message in messages[-6:]:
+    #     prompt_messages.append(message)
+    prompt_messages = _build_prompt_messages(action, topic, context, messages, weakness_memory)
     response = await llm.ainvoke(prompt_messages)
     if not response or not response.content:
         raise ValueError("empty response content")
     return response.content
 
-
-async def interviewer_node(state: InterviewState) -> dict:
+def prepare_interviewer_stream(state: InterviewState) -> tuple[list, list[dict]]:
     action = state.get("action", "initial_question")
     current_topic = state.get("current_topic", "")
     messages = list(state.get("messages", []))
     weakness_memory = state.get("weakness_memory", [])
-
     retrieved_chunks = _retrieve_context(current_topic, state)
     context = format_context(retrieved_chunks)
+    prompt_messages = _build_prompt_messages(action, current_topic, context, messages, weakness_memory)
+    return prompt_messages, retrieved_chunks
 
+async def stream_interviewer_tokens(state: InterviewState) -> AsyncIterator[str]:
+    llm = get_llm("interviewer")
+    if not llm:
+        raise RuntimeError("interviewer LLM is not configured")
+    prompt_messages, _ = prepare_interviewer_stream(state)
+    started_ms = now_ms()
+    try:
+        async for chunk in llm.astream(prompt_messages):
+            token = getattr(chunk, "content", None) or ""
+            if isinstance(token, list):
+                # 部分模型返回 content blocks
+                token = "".join(
+                    block.get("text", "") if isinstance(block, dict) else str(block)
+                    for block in token
+                )
+            if token:
+                yield token
+        log_llm_success("interviewer", started_ms)
+    except Exception as exc:
+        log_llm_failure("interviewer", exc, started_ms)
+        raise
+
+
+async def interviewer_node(state: InterviewState) -> dict:
     llm = get_llm("interviewer")
     if not llm:
         raise RuntimeError("interviewer LLM is not configured")
 
+    prompt_messages, retrieved_chunks = prepare_interviewer_stream(state)
     started_ms = now_ms()
     try:
-        question_text = await _generate_with_llm(
-            llm, action, current_topic, context, messages, weakness_memory
-        )
+        response = await llm.ainvoke(prompt_messages)
+        question_text = response.content if response else ""
+        if not question_text:
+            raise ValueError("empty response content")
         log_llm_success("interviewer", started_ms)
         return {
             "messages": [AIMessage(content=question_text)],

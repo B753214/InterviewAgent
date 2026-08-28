@@ -1,6 +1,8 @@
+import json
 import traceback
 
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.agent.schemas.interview import AnswerRequest, InterviewCreate
@@ -61,6 +63,39 @@ async def submit_answer(
     except Exception as exc:
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.post("/{session_id}/answer/stream")
+async def submit_answer_stream(
+    session_id: str,
+    body: AnswerRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    session = await interview_service.get_session(db, session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+    async def generate():
+        async for event_type, payload in interview_service.stream_submit_answer(db, session, body.answer):
+            if event_type == "error":
+                yield f"event: error\ndata: {json.dumps({'detail': payload}, ensure_ascii=False)}\n\n"
+                return
+            if event_type == "token":
+                yield f"event: token\ndata: {json.dumps({'token': payload}, ensure_ascii=False)}\n\n"
+            elif event_type == "message_end":
+                yield f"event: message_end\ndata: {json.dumps({'full_text': payload}, ensure_ascii=False)}\n\n"
+            elif event_type == "assessment":
+                yield f"event: assessment\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
 
 @router.post("/{session_id}/finish")
 async def finish_interview(

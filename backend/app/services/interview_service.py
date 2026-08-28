@@ -2,17 +2,55 @@
 from __future__ import annotations
 
 import uuid
+from collections.abc import AsyncIterator
 from datetime import datetime
 
 from langchain_core.messages import AIMessage, HumanMessage
+from langgraph.graph import add_messages
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from backend.app.agent.interviewer.assessment import assessment_node
 from backend.app.agent.interviewer.graph import run_interview_workflow
+from backend.app.agent.interviewer.initiallizer import initialize_node
+from backend.app.agent.interviewer.interviewer import (
+    prepare_interviewer_stream,
+    stream_interviewer_tokens,
+)
+from backend.app.agent.interviewer.memory_updater import memory_updater_node
+from backend.app.agent.interviewer.question_router import question_router_node
 from backend.app.agent.schemas.interview import InterviewCreate, InterviewEvent, InterviewSession
 from backend.app.models.interview_session import InterviewSessionORM
 from backend.app.services import job_service, memory_service, resume_service
 
+
+def _merge_graph_delta(state: dict, delta: dict) -> dict:
+    if not delta:
+        return state
+    merged = {**state, **delta}
+    if "messages" in delta:
+        merged["messages"] = add_messages(state.get("messages", []), delta["messages"])
+    return merged
+
+
+async def _run_until_router(db: AsyncSession, session: InterviewSession) -> dict:
+    """只跑 initializer + question_router，不跑 interviewer（留给流式）。"""
+    state = await _session_to_graph_state(db, session)
+    state = _merge_graph_delta(state, await initialize_node(state))
+    state = _merge_graph_delta(state, await question_router_node(state))
+    return state
+
+
+async def _run_assessment_pipeline(
+    db: AsyncSession,
+    session: InterviewSession,
+    state: dict,
+) -> InterviewSession:
+    state = _merge_graph_delta(state, await assessment_node(state))
+    state = _merge_graph_delta(state, await memory_updater_node(state))
+    _graph_state_to_session(state, session)
+    await _save_session(db, session)
+    return session
 
 async def create_session(db: AsyncSession, data: InterviewCreate) -> InterviewSession:
     session = InterviewSession(
@@ -191,9 +229,66 @@ async def generate_first_question(db: AsyncSession, session: InterviewSession) -
     session = await _run_and_persist(db, session)
     return InterviewEvent(event="first_question", data=_last_interviewer_message(session))
 
+async def stream_submit_answer(
+    db: AsyncSession,
+    session: InterviewSession,
+    answer: str,
+) -> AsyncIterator[tuple[str, str | dict]]:
+    """
+    异步生成器，yield (event_type, payload):
+      - ("token", "某")
+      - ("message_end", "完整问题")
+      - ("assessment", {...})
+      - ("error", "错误信息")
+    """
+    if session.status != "active":
+        yield ("error", "Session already ended")
+        return
+
+    session.messages.append({"role": "user", "content": answer})
+
+    try:
+        state = await _run_until_router(db, session)
+    except Exception as exc:
+        yield ("error", str(exc))
+        return
+
+    # 先把 router 决策写回 session（追问计数、话题等），即使后续流式失败也保留
+    _graph_state_to_session(state, session)
+    await _save_session(db, session)
+
+    if state.get("action") == "assess":
+        session = await _run_assessment_pipeline(db, session, state)
+        yield ("assessment", session.assessment or {})
+        return
+
+    _, retrieved_chunks = prepare_interviewer_stream(state)
+    full_text = ""
+    try:
+        async for token in stream_interviewer_tokens(state):
+            full_text += token
+            yield ("token", token)
+    except Exception as exc:
+        yield ("error", str(exc))
+        return
+
+    if not full_text.strip():
+        yield ("error", "empty interviewer response")
+        return
+
+    state = _merge_graph_delta(
+        state,
+        {
+            "messages": [AIMessage(content=full_text)],
+            "current_round": state.get("current_round", 0) + 1,
+            "retrieved_context": retrieved_chunks,
+        },
+    )
+    _graph_state_to_session(state, session)
+    await _save_session(db, session)
+    yield ("message_end", full_text)
 
 async def submit_answer(db: AsyncSession, session: InterviewSession, answer: str) -> InterviewEvent:
-    session = await get_session(db, session.id )
     if session is None:
         return InterviewEvent(event="error", data="Session not found")
     if session.status != "active":
